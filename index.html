@@ -44,12 +44,15 @@
       <button id="btnCancelar" class="btn" style="background:#c0392b;display:none">✖️ Cancelar</button>
       <button id="btnDescargar" class="btn" style="background:#27ae60;display:none">⬇️ Descargar coincidencias</button>
       <button id="btnExcel" class="btn" style="background:#229954;display:none">📊 Descargar Excel</button>
+      <button id="btnBuscarParecidas" class="btn" style="background:#8e44ad;">🔎 Buscar líneas parecidas</button>
     </div>
 
     <progress id="progreso" value="0" max="100" style="display:block;margin-top:12px"></progress>
     <div id="status" class="meta">Estado: esperando archivo...</div>
     <div id="contador" class="meta"></div>
     <div id="resultados"></div>
+    <div id="parecidas"></div>
+    <div id="paginadoParecidas" style="margin:16px 0;text-align:center;"></div>
     <div id="notice" class="notice" style="display:none"></div>
   </div>
 
@@ -60,14 +63,20 @@
   const btnBuscar = document.getElementById('btnBuscar');
   const btnCancelar = document.getElementById('btnCancelar');
   const btnDescargar = document.getElementById('btnDescargar');
-
+  const btnBuscarParecidas = document.getElementById('btnBuscarParecidas');
+  const parecidasEl = document.getElementById('parecidas');
+  const paginadoParecidasEl = document.getElementById('paginadoParecidas');
+  const resultadosEl = document.getElementById('resultados');
+  const contadorEl = document.getElementById('contador');
+  const noticeEl = document.getElementById('notice');
   const progreso = document.getElementById('progreso');
   const status = document.getElementById('status');
-  const contadorEl = document.getElementById('contador');
-  const resultadosEl = document.getElementById('resultados');
-  const mostrarTodasCheckbox = document.getElementById('mostrarTodas');
-  const noticeEl = document.getElementById('notice');
   const btnExcel = document.getElementById('btnExcel');
+  const mostrarTodasCheckbox = document.getElementById('mostrarTodas');
+
+  let gruposParecidas = [];
+  let paginaActualParecidas = 1;
+  const gruposPorPagina = 100;
 
   let abortRequested = false;
   let downloadBlobUrl = null;
@@ -349,6 +358,140 @@
       fr.onerror = e => reject(e);
       fr.readAsText(blob);
     });
+  }
+
+  btnBuscarParecidas.addEventListener('click', async () => {
+    const files = Array.from(fileInput.files);
+    if(!files.length) { alert('Selecciona al menos un archivo'); return; }
+    btnBuscarParecidas.disabled = true;
+    parecidasEl.innerHTML = '<b>Analizando líneas parecidas...</b>';
+    paginadoParecidasEl.innerHTML = '';
+    progreso.value = 0;
+    progreso.style.display = 'block';
+    let allLines = [];
+    for (let file of files) {
+      const text = await readBlobAsText(file);
+      const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+      for (let line of lines) {
+        allLines.push({file: file.name, raw: line, norm: normalizarLinea(line)});
+      }
+    }
+    // Comparar todas las líneas entre sí (O(n^2), pero con barra de progreso)
+    let grupos = [];
+    let usado = new Array(allLines.length).fill(false);
+    let comparaciones = allLines.length * (allLines.length-1) / 2;
+    let hechas = 0;
+    for (let i = 0; i < allLines.length; i++) {
+      if (usado[i]) continue;
+      let grupo = [allLines[i]];
+      for (let j = i+1; j < allLines.length; j++) {
+        if (usado[j]) continue;
+        if (sonSimilares(allLines[i].norm, allLines[j].norm)) {
+          grupo.push(allLines[j]);
+          usado[j] = true;
+        }
+        hechas++;
+        if (hechas % 500 === 0) {
+          progreso.value = Math.round((hechas/comparaciones)*100);
+        }
+      }
+      if (grupo.length > 1) grupos.push(grupo);
+      usado[i] = true;
+    }
+    progreso.value = 100;
+    gruposParecidas = grupos;
+    paginaActualParecidas = 1;
+    mostrarPaginaParecidas();
+    btnBuscarParecidas.disabled = false;
+    setTimeout(()=>{progreso.style.display='none';},1000);
+  });
+
+  // Hacer la función global para los botones de paginación
+  window.mostrarPaginaParecidas = mostrarPaginaParecidas;
+
+  function mostrarPaginaParecidas() {
+    const totalPaginas = Math.ceil(gruposParecidas.length / gruposPorPagina);
+    if (gruposParecidas.length === 0) {
+      parecidasEl.innerHTML = '<b>No se encontraron líneas parecidas (ignorando fecha/hora).</b>';
+      paginadoParecidasEl.innerHTML = '';
+      return;
+    }
+    let html = '<h3>🔎 Líneas de código parecidas (ignorando fecha/hora):</h3>';
+    const inicio = (paginaActualParecidas-1)*gruposPorPagina;
+    const fin = Math.min(inicio+gruposPorPagina, gruposParecidas.length);
+    for (let idx = inicio; idx < fin; idx++) {
+      const grupo = gruposParecidas[idx];
+      html += '<div style="margin-bottom:16px;padding:10px;border:1px solid #ddd;border-radius:6px;background:#fafafa">';
+      html += `<div style='color:#065a9d;font-weight:bold'>${escapeHtml(grupo[0].norm)}</div>`;
+      html += '<ul style="margin:8px 0 0 16px">';
+      for (let obj of grupo) {
+        html += `<li><span style='color:#888'>[${escapeHtml(obj.file)}]</span> ${escapeHtml(obj.raw)}</li>`;
+      }
+      html += '</ul></div>';
+    }
+    parecidasEl.innerHTML = html;
+    // Controles de paginado
+    let pagHtml = '';
+    if (totalPaginas > 1) {
+      pagHtml += `<button ${paginaActualParecidas===1?'disabled':''} onclick='window.mostrarPaginaParecidasNav(-1)'>Anterior</button> `;
+      pagHtml += `Página ${paginaActualParecidas} de ${totalPaginas} `;
+      pagHtml += `<button ${paginaActualParecidas===totalPaginas?'disabled':''} onclick='window.mostrarPaginaParecidasNav(1)'>Siguiente</button>`;
+    }
+    paginadoParecidasEl.innerHTML = pagHtml;
+  }
+
+  window.mostrarPaginaParecidasNav = function(delta) {
+    const totalPaginas = Math.ceil(gruposParecidas.length / gruposPorPagina);
+    paginaActualParecidas += delta;
+    if (paginaActualParecidas < 1) paginaActualParecidas = 1;
+    if (paginaActualParecidas > totalPaginas) paginaActualParecidas = totalPaginas;
+    mostrarPaginaParecidas();
+  }
+
+  function normalizarLinea(linea) {
+    return linea
+      // Eliminar fechas tipo 2025-08-15, 15/08/2025, 2025/08/15, etc
+      .replace(/\b\d{4}[-\/]\d{2}[-\/]\d{2}\b/g, '')
+      .replace(/\b\d{2}[\/\-]\d{2}[\/\-]\d{4}\b/g, '')
+      // Eliminar horas tipo 12:34:56 y 12:34
+      .replace(/\b\d{2}:\d{2}:\d{2}\b/g, '')
+      .replace(/\b\d{2}:\d{2}\b/g, '')
+      // Eliminar cualquier número (entero o decimal)
+      .replace(/\b\d+(\.\d+)?\b/g, '')
+      // Eliminar años sueltos
+      .replace(/\b\d{4}\b/g, '')
+      // Espacios extra
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function sonSimilares(a, b) {
+    if (!a || !b) return false;
+    if (a === b) return false;
+    let dist = levenshtein(a, b);
+    let maxLen = Math.max(a.length, b.length);
+    return dist <= Math.floor(maxLen * 0.3);
+  }
+
+  function levenshtein(a, b) {
+    const matrix = [];
+    let i;
+    for (i = 0; i <= b.length; i++) { matrix[i] = [i]; }
+    let j;
+    for (j = 0; j <= a.length; j++) { matrix[0][j] = j; }
+    for (i = 1; i <= b.length; i++) {
+      for (j = 1; j <= a.length; j++) {
+        if (b.charAt(i - 1) === a.charAt(j - 1)) {
+          matrix[i][j] = matrix[i - 1][j - 1];
+        } else {
+          matrix[i][j] = Math.min(
+            matrix[i - 1][j - 1] + 1,
+            Math.min(matrix[i][j - 1] + 1, matrix[i - 1][j] + 1)
+          );
+        }
+      }
+    }
+    return matrix[b.length][a.length];
   }
 
 })();
